@@ -1,10 +1,16 @@
---[[ Modern Universal - Standalone Combined Bundle
-     Assembled, cleaned, and fully fixed.
-     Includes: EntityLib, Prediction, and Universal Features
+--[[ Modern Universal - Standalone Combined Bundle with Functional Test GUI
+     Assembled, cleaned, executor-safe, and outfitted with an interactive GUI interface.
+     Toggle Menu Key: RightShift or Insert
 --]]
 
--- Environment & Executor Compatibility
+-- Executor API Safety Wrappers
 local cloneref = cloneref or function(obj) return obj end
+local mousemoverel = mousemoverel or function(x, y) end
+local firetouchinterest = firetouchinterest or function(part1, part2, state) end
+local isrbxactive = isrbxactive or iswindowactive or function() return true end
+local mouse1click = mouse1click or function() end
+local mouse2click = mouse2click or function() end
+
 if identifyexecutor then
 	local name = ({identifyexecutor()})[1]
 	if table.find({'Argon', 'Wave'}, name) then
@@ -12,7 +18,24 @@ if identifyexecutor then
 	end
 end
 
--- Initialize Modern Table & Core Storage
+-- Global Drawing Fallback
+if not Drawing then
+	getgenv().Drawing = {
+		new = function()
+			return setmetatable({}, {
+				__newindex = function() end,
+				__index = function(t, k)
+					if k == "Remove" or k == "Destroy" then
+						return function() end
+					end
+					return Vector2.zero
+				end
+			})
+		end
+	}
+end
+
+-- Initialize Core Storage
 shared.Modern = shared.Modern or {}
 local Modern = shared.Modern
 Modern.Libraries = Modern.Libraries or {}
@@ -21,9 +44,21 @@ Modern.Modules = Modern.Modules or {}
 Modern.ClickGuiStatus = Modern.ClickGuiStatus or { Enabled = false }
 Modern.Loaded = true
 
--- Fallback UI Target
+-- UI Target Setup
+local Players = cloneref(game:GetService('Players'))
 local CoreGui = cloneref(game:GetService('CoreGui'))
-Modern.MainScreenGui = Modern.MainScreenGui or CoreGui:FindFirstChild('ModernGui') or Instance.new('ScreenGui', CoreGui)
+local LocalPlayer = Players.LocalPlayer
+local TargetGuiParent = CoreGui or (LocalPlayer and LocalPlayer:FindFirstChildOfClass("PlayerGui"))
+
+if Modern.MainScreenGui then
+	Modern.MainScreenGui:Destroy()
+end
+
+Modern.MainScreenGui = Instance.new('ScreenGui')
+Modern.MainScreenGui.Name = 'ModernGui'
+Modern.MainScreenGui.ResetOnSpawn = false
+Modern.MainScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+Modern.MainScreenGui.Parent = TargetGuiParent
 
 -- Fallback UI Palette & Helper Shims
 Modern.Libraries.uipallet = Modern.Libraries.uipallet or {
@@ -55,56 +90,46 @@ end
 
 Modern.Uninject = Modern.Uninject or function(self)
 	Modern.Loaded = false
+	if Modern.MainScreenGui then
+		Modern.MainScreenGui:Destroy()
+	end
 end
 
--- Modern Modular Catalog Fallback
+-- Module Catalog System
+local moduleUpdateCallbacks = {}
+
 local function createCatalogShim(name)
 	return {
 		Name = name,
 		AddModule = function(self, opts)
 			local mod = {
 				Name = opts.Name or 'Module',
+				Category = name,
 				Enabled = false,
 				Clean = function(s, obj) Modern:Clean(obj) end,
 				AddToggle = function(s, topts)
-					local tog = { 
-						Value = topts.Default or false, 
-						Enabled = topts.Default or false, 
-						Frame = { Visible = topts.Visible ~= false } 
-					}
-					return tog
+					return { Value = topts.Default or false, Enabled = topts.Default or false, Frame = { Visible = topts.Visible ~= false } }
 				end,
 				AddSlider = function(s, sopts)
-					local sld = { 
-						Value = sopts.Default or 1, 
-						Frame = { Visible = sopts.Visible ~= false } 
-					}
-					return sld
+					return { Value = sopts.Default or 1, Frame = { Visible = sopts.Visible ~= false } }
 				end,
 				AddDropdown = function(s, dopts)
-					local drp = { 
-						Value = dopts.Default or (dopts.List and dopts.List[1]) or '', 
-						Frame = { Visible = dopts.Visible ~= false } 
-					}
-					return drp
+					return { Value = dopts.Default or (dopts.List and dopts.List[1]) or '', Frame = { Visible = dopts.Visible ~= false } }
 				end,
 				AddColorPicker = function(s, copts)
-					local clr = { 
-						Value = copts.Default or Color3.new(1, 1, 1), 
-						Frame = { Visible = copts.Visible ~= false } 
-					}
-					return clr
+					return { Value = copts.Default or Color3.new(1, 1, 1), Frame = { Visible = copts.Visible ~= false } }
 				end,
 				AddKeybind = function(s, kopts)
-					local kbd = { 
-						Value = kopts.Default or Enum.KeyCode.Unknown, 
-						Frame = { Visible = kopts.Visible ~= false } 
-					}
-					return kbd
+					return { Value = kopts.Default or Enum.KeyCode.Unknown, Frame = { Visible = kopts.Visible ~= false } }
 				end,
 				ToggleButton = function(s, state)
 					s.Enabled = (state ~= nil) and state or not s.Enabled
-					if opts.Function then opts.Function(s.Enabled) end
+					if opts.Function then 
+						task.spawn(opts.Function, s.Enabled)
+					end
+					if moduleUpdateCallbacks[s.Name] then
+						moduleUpdateCallbacks[s.Name](s.Enabled)
+					end
 				end,
 				Toggle = function(s)
 					s:ToggleButton()
@@ -122,7 +147,7 @@ for _, cat in ipairs({'Combat', 'Movement', 'Render', 'Player', 'Other', 'World'
 	end
 end
 
--- Embedded In-Memory Module Loader
+-- Modular File Loader
 shared.ModernFile = shared.ModernFile or {}
 local ModernFile = shared.ModernFile
 local embeddedModules = {}
@@ -131,7 +156,7 @@ ModernFile.loadfile = function(path)
 	if embeddedModules[path] then
 		return embeddedModules[path]()
 	end
-	if isfile and isfile(path) then
+	if isfile and readfile and isfile(path) then
 		return loadstring(readfile(path))()
 	end
 	error('[Modern] Module not found: ' .. tostring(path))
@@ -165,7 +190,7 @@ embeddedModules['Modern/Library/Entity.lua'] = function()
 						}
 					end,
 					Fire = function(rself, ...)
-						for _, v in rself.Connections do
+						for _, v in ipairs(rself.Connections) do
 							task.spawn(v, ...)
 						end
 					end,
@@ -179,11 +204,10 @@ embeddedModules['Modern/Library/Entity.lua'] = function()
 		})
 	}
 
-	local cloneref = cloneref or function(obj) return obj end
 	local playersService = cloneref(game:GetService('Players'))
 	local inputService = cloneref(game:GetService('UserInputService'))
 	local lplr = playersService.LocalPlayer
-	local gameCamera = workspace.CurrentCamera
+	local gameCamera = workspace.CurrentCamera or workspace:FindFirstChildWhichIsA('Camera')
 
 	local function getMousePosition()
 		if inputService.TouchEnabled then
@@ -193,7 +217,7 @@ embeddedModules['Modern/Library/Entity.lua'] = function()
 	end
 
 	local function loopClean(tbl)
-		for i, v in tbl do
+		for i, v in pairs(tbl) do
 			if type(v) == 'table' then
 				loopClean(v)
 			end
@@ -213,9 +237,7 @@ embeddedModules['Modern/Library/Entity.lua'] = function()
 	end
 
 	entitylib.targetCheck = function(ent)
-		if ent.TeamCheck then
-			return ent:TeamCheck()
-		end
+		if ent.TeamCheck then return ent:TeamCheck() end
 		if ent.NPC then return true end
 		if not lplr.Team then return true end
 		if not ent.Player.Team then return true end
@@ -245,14 +267,14 @@ embeddedModules['Modern/Library/Entity.lua'] = function()
 
 	entitylib.Wallcheck = function(origin, position, ignoreobject)
 		if typeof(ignoreobject) ~= 'Instance' then
-			local ignorelist = {gameCamera, lplr.Character}
-			for _, v in entitylib.List do
+			local ignorelist = {gameCamera, lplr and lplr.Character}
+			for _, v in ipairs(entitylib.List) do
 				if v.Targetable then
 					table.insert(ignorelist, v.Character)
 				end
 			end
 			if typeof(ignoreobject) == 'table' then
-				for _, v in ignoreobject do
+				for _, v in ipairs(ignoreobject) do
 					table.insert(ignorelist, v)
 				end
 			end
@@ -265,7 +287,7 @@ embeddedModules['Modern/Library/Entity.lua'] = function()
 	entitylib.EntityMouse = function(entitysettings)
 		if entitylib.isAlive then
 			local mouseLocation, sortingTable = entitysettings.MouseOrigin or getMousePosition(), {}
-			for _, v in entitylib.List do
+			for _, v in ipairs(entitylib.List) do
 				if not entitysettings.Players and v.Player then continue end
 				if not entitysettings.NPCs and v.NPC then continue end
 				if not v.Targetable then continue end
@@ -274,65 +296,47 @@ embeddedModules['Modern/Library/Entity.lua'] = function()
 				local mag = (mouseLocation - Vector2.new(position.x, position.y)).Magnitude
 				if mag > entitysettings.Range then continue end
 				if entitysettings.ignoreVulnerable or entitylib.isVulnerable(v) then
-					table.insert(sortingTable, {
-						Entity = v,
-						Magnitude = v.Target and -1 or mag
-					})
+					table.insert(sortingTable, { Entity = v, Magnitude = v.Target and -1 or mag })
 				end
 			end
-			table.sort(sortingTable, entitysettings.Sort or function(a, b)
-				return a.Magnitude < b.Magnitude
-			end)
-			for _, v in sortingTable do
+			table.sort(sortingTable, entitysettings.Sort or function(a, b) return a.Magnitude < b.Magnitude end)
+			for _, v in ipairs(sortingTable) do
 				if entitysettings.Wallcheck then
 					if entitylib.Wallcheck(entitysettings.Origin, v.Entity[entitysettings.Part].Position, entitysettings.Wallcheck) then continue end
 				end
-				table.clear(entitysettings)
-				table.clear(sortingTable)
 				return v.Entity
 			end
-			table.clear(sortingTable)
 		end
-		table.clear(entitysettings)
 	end
 
 	entitylib.EntityPosition = function(entitysettings)
 		if entitylib.isAlive then
 			local localPosition, sortingTable = entitysettings.Origin or entitylib.character.HumanoidRootPart.Position, {}
-			for _, v in entitylib.List do
+			for _, v in ipairs(entitylib.List) do
 				if not entitysettings.Players and v.Player then continue end
 				if not entitysettings.NPCs and v.NPC then continue end
 				if not v.Targetable then continue end
 				local mag = (v[entitysettings.Part].Position - localPosition).Magnitude
 				if mag > entitysettings.Range then continue end
 				if entitylib.isVulnerable(v) then
-					table.insert(sortingTable, {
-						Entity = v,
-						Magnitude = v.Target and -1 or mag
-					})
+					table.insert(sortingTable, { Entity = v, Magnitude = v.Target and -1 or mag })
 				end
 			end
-			table.sort(sortingTable, entitysettings.Sort or function(a, b)
-				return a.Magnitude < b.Magnitude
-			end)
-			for _, v in sortingTable do
+			table.sort(sortingTable, entitysettings.Sort or function(a, b) return a.Magnitude < b.Magnitude end)
+			for _, v in ipairs(sortingTable) do
 				if entitysettings.Wallcheck then
 					if entitylib.Wallcheck(localPosition, v.Entity[entitysettings.Part].Position, entitysettings.Wallcheck) then continue end
 				end
-				table.clear(entitysettings)
-				table.clear(sortingTable)
 				return v.Entity
 			end
-			table.clear(sortingTable)
 		end
-		table.clear(entitysettings)
 	end
 
 	entitylib.AllPosition = function(entitysettings)
 		local returned = {}
 		if entitylib.isAlive then
 			local localPosition, sortingTable = entitysettings.Origin or entitylib.character.HumanoidRootPart.Position, {}
-			for _, v in entitylib.List do
+			for _, v in ipairs(entitylib.List) do
 				if not entitysettings.Players and v.Player then continue end
 				if not entitysettings.NPCs and v.NPC then continue end
 				if not v.Targetable then continue end
@@ -340,24 +344,20 @@ embeddedModules['Modern/Library/Entity.lua'] = function()
 				if mag > entitysettings.Range then continue end
 				table.insert(sortingTable, {Entity = v, Magnitude = v.Target and -1 or mag})
 			end
-			table.sort(sortingTable, entitysettings.Sort or function(a, b)
-				return a.Magnitude < b.Magnitude
-			end)
-			for _, v in sortingTable do
+			table.sort(sortingTable, entitysettings.Sort or function(a, b) return a.Magnitude < b.Magnitude end)
+			for _, v in ipairs(sortingTable) do
 				if entitysettings.Wallcheck then
 					if entitylib.Wallcheck(localPosition, v.Entity[entitysettings.Part].Position, entitysettings.Wallcheck) and entitylib.isVulnerable(v.Entity) then continue end
 				end
 				table.insert(returned, v.Entity)
 				if #returned >= (entitysettings.Limit or math.huge) then break end
 			end
-			table.clear(sortingTable)
 		end
-		table.clear(entitysettings)
 		return returned
 	end
 
 	entitylib.getEntity = function(char)
-		for i, v in entitylib.List do
+		for i, v in ipairs(entitylib.List) do
 			if v.Player == char or v.Character == char then
 				return v, i
 			end
@@ -391,7 +391,7 @@ embeddedModules['Modern/Library/Entity.lua'] = function()
 					entitylib.Events.LocalAdded:Fire(entity)
 				else
 					entity.Targetable = entitylib.targetCheck(entity)
-					for _, v in entitylib.getUpdateConnections(entity) do
+					for _, v in ipairs(entitylib.getUpdateConnections(entity)) do
 						table.insert(entity.Connections, v:Connect(function()
 							entity.Health = hum.Health
 							entity.MaxHealth = hum.MaxHealth
@@ -410,10 +410,10 @@ embeddedModules['Modern/Library/Entity.lua'] = function()
 		if localcheck then
 			if entitylib.isAlive then
 				entitylib.isAlive = false
-				for _, v in entitylib.character.Connections do
+				for _, v in ipairs(entitylib.character.Connections or {}) do
 					v:Disconnect()
 				end
-				table.clear(entitylib.character.Connections)
+				table.clear(entitylib.character.Connections or {})
 				entitylib.Events.LocalRemoved:Fire(entitylib.character)
 			end
 			return
@@ -425,9 +425,7 @@ embeddedModules['Modern/Library/Entity.lua'] = function()
 			end
 			local entity, ind = entitylib.getEntity(char)
 			if ind then
-				for _, v in entity.Connections do
-					v:Disconnect()
-				end
+				for _, v in ipairs(entity.Connections) do v:Disconnect() end
 				table.clear(entity.Connections)
 				table.remove(entitylib.List, ind)
 				entitylib.Events.EntityRemoved:Fire(entity)
@@ -441,36 +439,22 @@ embeddedModules['Modern/Library/Entity.lua'] = function()
 	end
 
 	entitylib.addPlayer = function(plr)
-		if plr.Character then
-			entitylib.refreshEntity(plr.Character, plr)
-		end
+		if plr.Character then entitylib.refreshEntity(plr.Character, plr) end
 		entitylib.PlayerConnections[plr] = {
-			plr.CharacterAdded:Connect(function(char)
-				entitylib.refreshEntity(char, plr)
-			end),
-			plr.CharacterRemoving:Connect(function(char)
-				entitylib.removeEntity(char, plr == lplr)
-			end),
+			plr.CharacterAdded:Connect(function(char) entitylib.refreshEntity(char, plr) end),
+			plr.CharacterRemoving:Connect(function(char) entitylib.removeEntity(char, plr == lplr) end),
 			plr:GetPropertyChangedSignal('Team'):Connect(function()
-				for _, v in entitylib.List do
-					if v.Targetable ~= entitylib.targetCheck(v) then
-						entitylib.refreshEntity(v.Character, v.Player)
-					end
+				for _, v in ipairs(entitylib.List) do
+					if v.Targetable ~= entitylib.targetCheck(v) then entitylib.refreshEntity(v.Character, v.Player) end
 				end
-				if plr == lplr then
-					entitylib.start()
-				else
-					entitylib.refreshEntity(plr.Character, plr)
-				end
+				if plr == lplr then entitylib.start() else entitylib.refreshEntity(plr.Character, plr) end
 			end)
 		}
 	end
 
 	entitylib.removePlayer = function(plr)
 		if entitylib.PlayerConnections[plr] then
-			for _, v in entitylib.PlayerConnections[plr] do
-				v:Disconnect()
-			end
+			for _, v in ipairs(entitylib.PlayerConnections[plr]) do v:Disconnect() end
 			table.clear(entitylib.PlayerConnections[plr])
 			entitylib.PlayerConnections[plr] = nil
 		end
@@ -478,18 +462,10 @@ embeddedModules['Modern/Library/Entity.lua'] = function()
 	end
 
 	entitylib.start = function()
-		if entitylib.Running then
-			entitylib.stop()
-		end
-		table.insert(entitylib.Connections, playersService.PlayerAdded:Connect(function(v)
-			entitylib.addPlayer(v)
-		end))
-		table.insert(entitylib.Connections, playersService.PlayerRemoving:Connect(function(v)
-			entitylib.removePlayer(v)
-		end))
-		for _, v in playersService:GetPlayers() do
-			entitylib.addPlayer(v)
-		end
+		if entitylib.Running then entitylib.stop() end
+		table.insert(entitylib.Connections, playersService.PlayerAdded:Connect(function(v) entitylib.addPlayer(v) end))
+		table.insert(entitylib.Connections, playersService.PlayerRemoving:Connect(function(v) entitylib.removePlayer(v) end))
+		for _, v in ipairs(playersService:GetPlayers()) do entitylib.addPlayer(v) end
 		table.insert(entitylib.Connections, workspace:GetPropertyChangedSignal('CurrentCamera'):Connect(function()
 			gameCamera = workspace.CurrentCamera or workspace:FindFirstChildWhichIsA('Camera')
 		end))
@@ -497,23 +473,15 @@ embeddedModules['Modern/Library/Entity.lua'] = function()
 	end
 
 	entitylib.stop = function()
-		for _, v in entitylib.Connections do
-			v:Disconnect()
-		end
-		for _, v in entitylib.PlayerConnections do
-			for _, v2 in v do
-				v2:Disconnect()
-			end
+		for _, v in ipairs(entitylib.Connections) do v:Disconnect() end
+		for _, v in pairs(entitylib.PlayerConnections) do
+			for _, v2 in ipairs(v) do v2:Disconnect() end
 			table.clear(v)
 		end
 		entitylib.removeEntity(nil, true)
 		local cloned = table.clone(entitylib.List)
-		for _, v in cloned do
-			entitylib.removeEntity(v.Character)
-		end
-		for _, v in entitylib.EntityThreads do
-			task.cancel(v)
-		end
+		for _, v in ipairs(cloned) do entitylib.removeEntity(v.Character) end
+		for _, v in pairs(entitylib.EntityThreads) do task.cancel(v) end
 		table.clear(entitylib.PlayerConnections)
 		table.clear(entitylib.EntityThreads)
 		table.clear(entitylib.Connections)
@@ -522,22 +490,10 @@ embeddedModules['Modern/Library/Entity.lua'] = function()
 	end
 
 	entitylib.kill = function()
-		if entitylib.Running then
-			entitylib.stop()
-		end
-		for _, v in entitylib.Events do
-			v:Destroy()
-		end
+		if entitylib.Running then entitylib.stop() end
+		for _, v in pairs(entitylib.Events) do v:Destroy() end
 		entitylib.IgnoreObject:Destroy()
 		loopClean(entitylib)
-	end
-
-	entitylib.refresh = function()
-		local cloned = table.clone(entitylib.List)
-		for _, v in cloned do
-			entitylib.refreshEntity(v.Character, v.Player)
-		end
-		table.clear(cloned)
 	end
 
 	entitylib.start()
@@ -548,23 +504,15 @@ end
 -- MODULE: Modern/Library/Prediction.lua
 ----------------------------------------------------------------
 embeddedModules['Modern/Library/Prediction.lua'] = function()
-	--!optimize 2
 	local module = {}
 	local eps = 1e-9
 
-	local function isZero(d)
-		return (d > -eps and d < eps)
-	end
-
-	local function cuberoot(x)
-		return (x > 0) and math.pow(x, (1 / 3)) or -math.pow(math.abs(x), (1 / 3))
-	end
+	local function isZero(d) return (d > -eps and d < eps) end
+	local function cuberoot(x) return (x > 0) and math.pow(x, (1 / 3)) or -math.pow(math.abs(x), (1 / 3)) end
 
 	local function solveQuadric(c0, c1, c2)
 		local s0, s1
-		local p, q, D
-		p = c1 / (2 * c0)
-		q = c2 / c0
+		local p, q, D = c1 / (2 * c0), c2 / c0, nil
 		D = p * p - q
 		if isZero(D) then
 			s0 = -p
@@ -580,19 +528,13 @@ embeddedModules['Modern/Library/Prediction.lua'] = function()
 	end
 
 	local function solveCubic(c0, c1, c2, c3)
-		local s0, s1, s2
-		local num, sub
-		local A, B, C
-		local sq_A, p, q
-		local cb_p, D
-		A = c1 / c0
-		B = c2 / c0
-		C = c3 / c0
-		sq_A = A * A
-		p = (1 / 3) * (-(1 / 3) * sq_A + B)
-		q = 0.5 * ((2 / 27) * A * sq_A - (1 / 3) * A * B + C)
-		cb_p = p * p * p
-		D = q * q + cb_p
+		local s0, s1, s2, num, sub
+		local A, B, C = c1 / c0, c2 / c0, c3 / c0
+		local sq_A = A * A
+		local p = (1 / 3) * (-(1 / 3) * sq_A + B)
+		local q = 0.5 * ((2 / 27) * A * sq_A - (1 / 3) * A * B + C)
+		local cb_p = p * p * p
+		local D = q * q + cb_p
 		if isZero(D) then
 			if isZero(q) then
 				s0 = 0
@@ -627,71 +569,42 @@ embeddedModules['Modern/Library/Prediction.lua'] = function()
 	function module.solveQuartic(c0, c1, c2, c3, c4)
 		local s0, s1, s2, s3
 		local coeffs = {}
-		local z, u, v, sub
-		local A, B, C, D
-		local sq_A, p, q, r
-		local num
-		A = c1 / c0
-		B = c2 / c0
-		C = c3 / c0
-		D = c4 / c0
-		sq_A = A * A
-		p = -0.375 * sq_A + B
-		q = 0.125 * sq_A * A - 0.5 * A * B + C
-		r = -(3 / 256) * sq_A * sq_A + 0.0625 * sq_A * B - 0.25 * A * C + D
+		local z, u, v, sub, num
+		local A, B, C, D = c1 / c0, c2 / c0, c3 / c0, c4 / c0
+		local sq_A = A * A
+		local p = -0.375 * sq_A + B
+		local q = 0.125 * sq_A * A - 0.5 * A * B + C
+		local r = -(3 / 256) * sq_A * sq_A + 0.0625 * sq_A * B - 0.25 * A * C + D
+
 		if isZero(r) then
-			coeffs[3] = q
-			coeffs[2] = p
-			coeffs[1] = 0
-			coeffs[0] = 1
+			coeffs[3], coeffs[2], coeffs[1], coeffs[0] = q, p, 0, 1
 			local results = {solveCubic(coeffs[0], coeffs[1], coeffs[2], coeffs[3])}
 			num = #results
 			s0, s1, s2 = results[1], results[2], results[3]
 		else
-			coeffs[3] = 0.5 * r * p - 0.125 * q * q
-			coeffs[2] = -r
-			coeffs[1] = -0.5 * p
-			coeffs[0] = 1
+			coeffs[3], coeffs[2], coeffs[1], coeffs[0] = 0.5 * r * p - 0.125 * q * q, -r, -0.5 * p, 1
 			s0, s1, s2 = solveCubic(coeffs[0], coeffs[1], coeffs[2], coeffs[3])
 			z = s0
 			u = z * z - r
 			v = 2 * z - p
-			if isZero(u) then
-				u = 0
-			elseif (u > 0) then
-				u = math.sqrt(u)
-			else
-				return
-			end
-			if isZero(v) then
-				v = 0
-			elseif (v > 0) then
-				v = math.sqrt(v)
-			else
-				return
-			end
-			coeffs[2] = z - u
-			coeffs[1] = q < 0 and -v or v
-			coeffs[0] = 1
+			if isZero(u) then u = 0 elseif (u > 0) then u = math.sqrt(u) else return end
+			if isZero(v) then v = 0 elseif (v > 0) then v = math.sqrt(v) else return end
+			coeffs[2], coeffs[1], coeffs[0] = z - u, q < 0 and -v or v, 1
 			do
 				local results = {solveQuadric(coeffs[0], coeffs[1], coeffs[2])}
 				num = #results
 				s0, s1 = results[1], results[2]
 			end
-			coeffs[2] = z + u
-			coeffs[1] = q < 0 and v or -v
-			coeffs[0] = 1
+			coeffs[2], coeffs[1], coeffs[0] = z + u, q < 0 and v or -v, 1
 			if (num == 0) then
 				local results = {solveQuadric(coeffs[0], coeffs[1], coeffs[2])}
 				num = num + #results
 				s0, s1 = results[1], results[2]
-			end
-			if (num == 1) then
+			elseif (num == 1) then
 				local results = {solveQuadric(coeffs[0], coeffs[1], coeffs[2])}
 				num = num + #results
 				s1, s2 = results[1], results[2]
-			end
-			if (num == 2) then
+			elseif (num == 2) then
 				local results = {solveQuadric(coeffs[0], coeffs[1], coeffs[2])}
 				num = num + #results
 				s2, s3 = results[1], results[2]
@@ -739,11 +652,9 @@ embeddedModules['Modern/Library/Prediction.lua'] = function()
 		)
 
 		if solutions then
-			local posRoots = table.create(2)
-			for _, v in solutions do
-				if v > 0 then
-					table.insert(posRoots, v)
-				end
+			local posRoots = {}
+			for _, v in ipairs(solutions) do
+				if v > 0 then table.insert(posRoots, v) end
 			end
 			if posRoots[1] then
 				local t = posRoots[1]
@@ -765,33 +676,15 @@ embeddedModules['Modern/Library/Prediction.lua'] = function()
 end
 
 ----------------------------------------------------------------
--- MODULE: Modern/Games/Universal.lua
+-- MODULE INITIALIZATION & UNIVERSAL FEATURES
 ----------------------------------------------------------------
-local Modern = shared.Modern
-local cloneref = cloneref or function(obj) return obj end
-
-if identifyexecutor then
-	if table.find({'Argon', 'Wave'}, ({identifyexecutor()})[1]) then
-		getgenv().setthreadidentity = nil
-	end
-end
-
-local Players = cloneref(game:GetService('Players'))
 local UserInputService = cloneref(game:GetService('UserInputService'))
 local RunService = cloneref(game:GetService('RunService'))
-local GuiService = cloneref(game:GetService('GuiService'))
-local CoreGui = cloneref(game:GetService('CoreGui'))
 local gameCamera = workspace.CurrentCamera or workspace:FindFirstChildWhichIsA('Camera')
 local lplr = Players.LocalPlayer
 
-local run = function(func) func() end
-
-local ModernFile = shared.ModernFile
 local entitylib = ModernFile.loadfile("Modern/Library/Entity.lua")
 local prediction = ModernFile.loadfile("Modern/Library/Prediction.lua")
-local getfontsize = Modern.Libraries.getfontsize
-local addGradient = Modern.Libraries.addGradient
-local Targetinfo = Modern.Libraries.Targetinfo
 
 Modern.Libraries.entitylib = entitylib
 Modern.Libraries.prediction = prediction
@@ -811,18 +704,7 @@ local function calculateMoveVector(vec)
 end
 
 local function getTool()
-	return lplr.Character and lplr.Character:FindFirstChildWhichIsA('Tool', true) or nil
-end
-
-local function getTableSize(tab)
-	local ind = 0
-	for _ in tab do ind += 1 end
-	return ind
-end
-
-local function removeTags(str)
-	str = str:gsub('<br%s*/>', '\n')
-	return (str:gsub('<[^<>]->', ''))
+	return lplr and lplr.Character and lplr.Character:FindFirstChildWhichIsA('Tool', true) or nil
 end
 
 local function addRoundedShadow(parent)
@@ -851,9 +733,9 @@ end
 
 local frictionTable, oldfrict = {}, {}
 local function updateVelocity()
-	if getTableSize(frictionTable) > 0 then
+	if next(frictionTable) then
 		if entitylib.isAlive then
-			for _, v in entitylib.character.Character:GetChildren() do
+			for _, v in ipairs(entitylib.character.Character:GetChildren()) do
 				if v:IsA('BasePart') and v.Name ~= 'HumanoidRootPart' and not oldfrict[v] then
 					oldfrict[v] = v.CustomPhysicalProperties or 'none'
 					v.CustomPhysicalProperties = PhysicalProperties.new(0.0001, 0.2, 0.5, 1, 1)
@@ -861,27 +743,23 @@ local function updateVelocity()
 			end
 		end
 	else
-		for i, v in oldfrict do
-			i.CustomPhysicalProperties = v ~= 'none' and v or nil
+		for i, v in pairs(oldfrict) do
+			if i and i.Parent then
+				i.CustomPhysicalProperties = v ~= 'none' and v or nil
+			end
 		end
 		table.clear(oldfrict)
 	end
 end
 
-run(function()
-	Modern:Clean(entitylib.Events.LocalAdded:Connect(updateVelocity))
-	Modern:Clean(workspace:GetPropertyChangedSignal('CurrentCamera'):Connect(function()
-		gameCamera = workspace.CurrentCamera or workspace:FindFirstChildWhichIsA('Camera')
-	end))
-end)
+Modern:Clean(entitylib.Events.LocalAdded:Connect(updateVelocity))
+Modern:Clean(workspace:GetPropertyChangedSignal('CurrentCamera'):Connect(function()
+	gameCamera = workspace.CurrentCamera or workspace:FindFirstChildWhichIsA('Camera')
+end))
 
-entitylib.start()
-repeat task.wait() until game:IsLoaded()
-
-local TargetStrafeVector
-
+-- Register Modules (Aim Assist, Auto Clicker, Reach, Aura, Fly, Speed, NameTags)
 -- Aim Assist
-run(function()
+task.spawn(function()
 	local AimAssist, Part, FOV, Speed, RightClick, ShowTarget, CircleFilled, CircleObject
 	local moveConst = Vector2.new(1, 0.77) * math.rad(0.5)
 
@@ -895,39 +773,25 @@ run(function()
 	AimAssist = Modern.Catalogs.Combat:AddModule({
 		Name = 'Aim Assist',
 		Function = function(callback)
-			if CircleObject then
-				CircleObject.Visible = callback
-			end
+			if CircleObject then CircleObject.Visible = callback end
 			if callback then
 				local ent
-				local rightClicked = not RightClick.Enabled or UserInputService:IsMouseButtonPressed(1)
+				local rightClicked = not RightClick.Enabled or UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton2)
 				AimAssist:Clean(RunService.RenderStepped:Connect(function(dt)
-					if CircleObject then
-						CircleObject.Position = UserInputService:GetMouseLocation()
-					end
-
-					if rightClicked and not Modern.ClickGuiStatus then
+					if CircleObject then CircleObject.Position = UserInputService:GetMouseLocation() end
+					if rightClicked and not Modern.ClickGuiStatus.Enabled then
 						ent = entitylib.EntityMouse({
-							Range = FOV.Value,
-							Part = Part.Value,
-							Players = true,
-							NPCs = false,
-							Wallcheck = true,
-							Origin = gameCamera.CFrame.Position
+							Range = FOV.Value, Part = Part.Value, Players = true, NPCs = false, Wallcheck = true, Origin = gameCamera.CFrame.Position
 						})
-
 						if ent then
 							local facing = gameCamera.CFrame.LookVector
 							local new = (ent[Part.Value].Position - gameCamera.CFrame.Position).Unit
 							new = new == new and new or Vector3.zero
-							if ShowTarget.Enabled then
-								Targetinfo.Targets[ent] = tick() + 1
-							end
+							if ShowTarget.Enabled then Modern.Libraries.Targetinfo.Targets[ent] = tick() + 1 end
 							if new ~= Vector3.zero then
 								local diffYaw = wrapAngle(math.atan2(facing.X, facing.Z) - math.atan2(new.X, new.Z))
 								local diffPitch = math.asin(facing.Y) - math.asin(new.Y)
 								local angle = Vector2.new(diffYaw, diffPitch) / (moveConst * UserSettings():GetService('UserGameSettings').MouseSensitivity)
-
 								angle *= math.min(Speed.Value * dt, 1)
 								mousemoverel(angle.X, angle.Y)
 							end
@@ -937,16 +801,10 @@ run(function()
 
 				if RightClick.Enabled then
 					AimAssist:Clean(UserInputService.InputBegan:Connect(function(input)
-						if input.UserInputType == Enum.UserInputType.MouseButton2 then
-							ent = nil
-							rightClicked = true
-						end
+						if input.UserInputType == Enum.UserInputType.MouseButton2 then ent = nil; rightClicked = true end
 					end))
-
 					AimAssist:Clean(UserInputService.InputEnded:Connect(function(input)
-						if input.UserInputType == Enum.UserInputType.MouseButton2 then
-							rightClicked = false
-						end
+						if input.UserInputType == Enum.UserInputType.MouseButton2 then rightClicked = false end
 					end))
 				end
 			end
@@ -954,15 +812,7 @@ run(function()
 	})
 
 	Part = AimAssist:AddDropdown({ Name = 'Part', List = {'RootPart', 'Head'} })
-	FOV = AimAssist:AddSlider({
-		Name = 'FOV',
-		Min = 0,
-		Max = 1000,
-		Default = 100,
-		Function = function(val)
-			if CircleObject then CircleObject.Radius = val end
-		end
-	})
+	FOV = AimAssist:AddSlider({ Name = 'FOV', Min = 0, Max = 1000, Default = 100, Function = function(val) if CircleObject then CircleObject.Radius = val end end })
 	Speed = AimAssist:AddSlider({ Name = 'Speed', Min = 0, Max = 80, Default = 15 })
 	AimAssist:AddToggle({
 		Name = 'Range Circle',
@@ -977,42 +827,36 @@ run(function()
 				CircleObject.Transparency = 0.9
 				CircleObject.Visible = AimAssist.Enabled
 			else
-				pcall(function()
-					CircleObject.Visible = false
-					CircleObject:Remove()
-				end)
+				pcall(function() CircleObject.Visible = false; CircleObject:Remove() end)
 			end
 			CircleFilled.Frame.Visible = callback
 		end
 	})
 	CircleFilled = AimAssist:AddToggle({ Name = 'Circle Filled', Function = function(callback) if CircleObject then CircleObject.Filled = callback end end, Visible = false })
-	RightClick = AimAssist:AddToggle({ Name = 'Require right click', Function = function() if AimAssist.Enabled then AimAssist:Toggle(); AimAssist:Toggle() end end })
-	ShowTarget = AimAssist:AddToggle({ Name = 'Show Target', Function = function() if AimAssist.Enabled then AimAssist:Toggle(); AimAssist:Toggle() end end })
+	RightClick = AimAssist:AddToggle({ Name = 'Require right click' })
+	ShowTarget = AimAssist:AddToggle({ Name = 'Show Target' })
 end)
 
 -- Auto Clicker
-run(function()
+task.spawn(function()
 	local AutoClicker, Mode, CPS
-
 	AutoClicker = Modern.Catalogs.Combat:AddModule({
 		Name = 'Auto Clicker',
 		Function = function(callback)
 			if callback then
-				repeat
-					if Mode.Value == 'Tool' then
-						local tool = getTool()
-						if tool and UserInputService:IsMouseButtonPressed(0) then
-							tool:Activate()
-						end
-					else
-						if mouse1click and (isrbxactive or iswindowactive)() then
-							if not Modern.ClickGuiStatus then
+				task.spawn(function()
+					repeat
+						if Mode.Value == 'Tool' then
+							local tool = getTool()
+							if tool and UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton1) then tool:Activate() end
+						else
+							if isrbxactive() and not Modern.ClickGuiStatus.Enabled then
 								(Mode.Value == 'Click' and mouse1click or mouse2click)()
 							end
 						end
-					end
-					task.wait(1 / CPS.Value)
-				until not AutoClicker.Enabled
+						task.wait(1 / CPS.Value)
+					until not AutoClicker.Enabled
+				end)
 			end
 		end
 	})
@@ -1021,7 +865,7 @@ run(function()
 end)
 
 -- Reach
-run(function()
+task.spawn(function()
 	local Reach, Mode, Value, Chance
 	local Overlay = OverlapParams.new()
 	Overlay.FilterType = Enum.RaycastFilterType.Include
@@ -1031,68 +875,54 @@ run(function()
 		Name = 'Reach',
 		Function = function(callback)
 			if callback then
-				repeat
-					local tool = getTool()
-					tool = tool and tool:FindFirstChildWhichIsA('TouchTransmitter', true)
-					if tool then
-						if Mode.Value == 'TouchInterest' then
-							local entites = {}
-							for _, v in entitylib.List do
-								if v.Targetable and v.Player then
-									table.insert(entites, v.Character)
+				task.spawn(function()
+					repeat
+						local tool = getTool()
+						tool = tool and tool:FindFirstChildWhichIsA('TouchTransmitter', true)
+						if tool and tool.Parent then
+							if Mode.Value == 'TouchInterest' then
+								local entities = {}
+								for _, v in ipairs(entitylib.List) do
+									if v.Targetable and v.Player then table.insert(entities, v.Character) end
 								end
-							end
-
-							Overlay.FilterDescendantsInstances = entites
-							local parts = workspace:GetPartBoundsInBox(tool.Parent.CFrame * CFrame.new(0, 0, Value.Value / 2), tool.Parent.Size + Vector3.new(0, 0, Value.Value), Overlay)
-
-							for _, v in parts do
-								if Random.new():NextNumber(0, 100) > Chance.Value then
-									task.wait(0.2)
-									break
+								Overlay.FilterDescendantsInstances = entities
+								local parts = workspace:GetPartBoundsInBox(tool.Parent.CFrame * CFrame.new(0, 0, Value.Value / 2), tool.Parent.Size + Vector3.new(0, 0, Value.Value), Overlay)
+								for _, v in ipairs(parts) do
+									if Random.new():NextNumber(0, 100) > Chance.Value then task.wait(0.2); break end
+									firetouchinterest(tool.Parent, v, 1)
+									firetouchinterest(tool.Parent, v, 0)
 								end
-
-								firetouchinterest(tool.Parent, v, 1)
-								firetouchinterest(tool.Parent, v, 0)
+							else
+								if not modified[tool.Parent] then modified[tool.Parent] = tool.Parent.Size end
+								tool.Parent.Size = modified[tool.Parent] + Vector3.new(0, 0, Value.Value)
+								tool.Parent.Massless = true
 							end
-						else
-							if not modified[tool.Parent] then
-								modified[tool.Parent] = tool.Parent.Size
-							end
-							tool.Parent.Size = modified[tool.Parent] + Vector3.new(0, 0, Value.Value)
-							tool.Parent.Massless = true
 						end
-					end
-
-					task.wait()
-				until not Reach.Enabled
+						task.wait(0.1)
+					until not Reach.Enabled
+				end)
 			else
-				for i, v in modified do
-					i.Size = v
-					i.Massless = false
+				for i, v in pairs(modified) do
+					if i and i.Parent then i.Size = v; i.Massless = false end
 				end
 				table.clear(modified)
 			end
 		end
 	})
-	Mode = Reach:AddDropdown({
-		Name = 'Mode',
-		List = {'TouchInterest', 'Resize'},
-		Function = function(val) Chance.Frame.Visible = val == 'TouchInterest' end
-	})
-	Value = Reach:AddSlider({ Name = 'Range', Min = 0, Max = 2, Decimal = 10 })
+	Mode = Reach:AddDropdown({ Name = 'Mode', List = {'TouchInterest', 'Resize'}, Function = function(val) Chance.Frame.Visible = val == 'TouchInterest' end })
+	Value = Reach:AddSlider({ Name = 'Range', Min = 0, Max = 10, Default = 3 })
 	Chance = Reach:AddSlider({ Name = 'Chance', Min = 0, Max = 100, Default = 100 })
 end)
 
--- Killaura
-run(function()
+-- Aura
+task.spawn(function()
 	local Killaura, CPS, SwingRange, AttackRange, AngleSlider, Max, Mouse
 	local Overlay = OverlapParams.new()
 	Overlay.FilterType = Enum.RaycastFilterType.Include
 	local Boxes, AttackDelay = {}, tick()
 
 	local function getAttackData()
-		if Mouse.Enabled and not UserInputService:IsMouseButtonPressed(0) then return false end
+		if Mouse.Enabled and not UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton1) then return false end
 		local tool = getTool()
 		return tool and tool:FindFirstChildWhichIsA('TouchTransmitter', true) or nil, tool
 	end
@@ -1101,61 +931,44 @@ run(function()
 		Name = 'Aura',
 		Function = function(callback)
 			if callback then
-				repeat
-					local interest, tool = getAttackData()
-					local attacked = {}
-					if interest then
-						local plrs = entitylib.AllPosition({
-							Range = SwingRange.Value,
-							Wallcheck = nil,
-							Part = 'RootPart',
-							Players = true,
-							NPCs = false,
-							Limit = Max.Value
-						})
+				task.spawn(function()
+					repeat
+						local interest, tool = getAttackData()
+						local attacked = {}
+						if interest and tool then
+							local plrs = entitylib.AllPosition({
+								Range = SwingRange.Value, Wallcheck = nil, Part = 'RootPart', Players = true, NPCs = false, Limit = Max.Value
+							})
+							if #plrs > 0 then
+								local selfpos = entitylib.character.RootPart.Position
+								local localfacing = entitylib.character.RootPart.CFrame.LookVector * Vector3.new(1, 0, 1)
 
-						if #plrs > 0 then
-							local selfpos = entitylib.character.RootPart.Position
-							local localfacing = entitylib.character.RootPart.CFrame.LookVector * Vector3.new(1, 0, 1)
+								for _, v in ipairs(plrs) do
+									local delta = (v.RootPart.Position - selfpos)
+									local angle = math.acos(localfacing:Dot((delta * Vector3.new(1, 0, 1)).Unit))
+									if angle > (math.rad(AngleSlider.Value) / 2) then continue end
 
-							for _, v in plrs do
-								local delta = (v.RootPart.Position - selfpos)
-								local angle = math.acos(localfacing:Dot((delta * Vector3.new(1, 0, 1)).Unit))
-								if angle > (math.rad(AngleSlider.Value) / 2) then continue end
+									table.insert(attacked, v)
+									Modern.Libraries.Targetinfo.Targets[v] = tick() + 1
 
-								table.insert(attacked, v)
-								Targetinfo.Targets[v] = tick() + 1
+									if AttackDelay < tick() then
+										AttackDelay = tick() + (1 / CPS.Value)
+										tool:Activate()
+									end
 
-								if AttackDelay < tick() then
-									AttackDelay = tick() + (1 / CPS.Value)
-									tool:Activate()
-								end
+									if delta.Magnitude > AttackRange.Value then continue end
 
-								if delta.Magnitude > AttackRange.Value then continue end
-
-								Overlay.FilterDescendantsInstances = {v.Character}
-								for _, part in workspace:GetPartBoundsInBox(v.RootPart.CFrame, Vector3.new(4, 4, 4), Overlay) do
-									firetouchinterest(interest.Parent, part, 1)
-									firetouchinterest(interest.Parent, part, 0)
+									Overlay.FilterDescendantsInstances = {v.Character}
+									for _, part in ipairs(workspace:GetPartBoundsInBox(v.RootPart.CFrame, Vector3.new(4, 4, 4), Overlay)) do
+										firetouchinterest(interest.Parent, part, 1)
+										firetouchinterest(interest.Parent, part, 0)
+									end
 								end
 							end
 						end
-					end
-
-					for i, v in Boxes do
-						v.Adornee = attacked[i] and attacked[i].RootPart or nil
-						if v.Adornee then
-							v.Color3 = Color3.fromHSV(0.6, 0.6, 0.6)
-							v.Transparency = 0.5
-						end
-					end
-
-					task.wait()
-				until not Killaura.Enabled
-			else
-				for _, v in Boxes do
-					v.Adornee = nil
-				end
+						task.wait(0.05)
+					until not Killaura.Enabled
+				end)
 			end
 		end
 	})
@@ -1165,172 +978,74 @@ run(function()
 	AngleSlider = Killaura:AddSlider({ Name = 'Max angle', Min = 1, Max = 360, Default = 90 })
 	Max = Killaura:AddSlider({ Name = 'Max targets', Min = 1, Max = 10, Default = 10 })
 	Mouse = Killaura:AddToggle({ Name = 'Require Click' })
-	Killaura:AddToggle({
-		Name = 'Show target',
-		Function = function(callback)
-			if callback then
-				for i = 1, 10 do
-					local box = Instance.new('BoxHandleAdornment')
-					box.Adornee = nil
-					box.AlwaysOnTop = true
-					box.Size = Vector3.new(3, 5, 3)
-					box.CFrame = CFrame.new(0, -0.5, 0)
-					box.ZIndex = 0
-					box.Parent = Modern.MainScreenGui
-					Boxes[i] = box
-				end
-			else
-				for _, v in Boxes do v:Destroy() end
-				table.clear(Boxes)
-			end
-		end
-	})
 end)
 
--- Movement Methods
+-- Movement Methods Helper
 local SpeedMethods = {
 	Velocity = function(options, moveDirection)
-		local root = entitylib.character.RootPart
-		root.AssemblyLinearVelocity = (moveDirection * options.Value.Value) + Vector3.new(0, root.AssemblyLinearVelocity.Y, 0)
+		if entitylib.isAlive and entitylib.character.RootPart then
+			local root = entitylib.character.RootPart
+			root.AssemblyLinearVelocity = (moveDirection * options.Value.Value) + Vector3.new(0, root.AssemblyLinearVelocity.Y, 0)
+		end
 	end,
 	Impulse = function(options, moveDirection)
-		local root = entitylib.character.RootPart
-		local diff = ((moveDirection * options.Value.Value) - root.AssemblyLinearVelocity) * Vector3.new(1, 0, 1)
-		if diff.Magnitude > (moveDirection == Vector3.zero and 10 or 2) then
-			root:ApplyImpulse(diff * root.AssemblyMass)
+		if entitylib.isAlive and entitylib.character.RootPart then
+			local root = entitylib.character.RootPart
+			local diff = ((moveDirection * options.Value.Value) - root.AssemblyLinearVelocity) * Vector3.new(1, 0, 1)
+			if diff.Magnitude > (moveDirection == Vector3.zero and 10 or 2) then
+				root:ApplyImpulse(diff * root.AssemblyMass)
+			end
 		end
 	end,
 	CFrame = function(options, moveDirection, dt)
-		local root = entitylib.character.RootPart
-		local dest = (moveDirection * math.max(options.Value.Value - entitylib.character.Humanoid.WalkSpeed, 0) * dt)
-		if options.WallCheck and options.WallCheck.Enabled then
-			options.rayCheck.FilterDescendantsInstances = {lplr.Character, gameCamera}
-			options.rayCheck.CollisionGroup = root.CollisionGroup
-			local ray = workspace:Raycast(root.Position, dest, options.rayCheck)
-			if ray then
-				dest = ((ray.Position + ray.Normal) - root.Position)
-			end
-		end
-		root.CFrame += dest
-	end,
-	TP = function(options, moveDirection)
-		if options.TPTiming < tick() then
-			options.TPTiming = tick() + options.TPFrequency.Value
-			SpeedMethods.CFrame(options, moveDirection, 1)
+		if entitylib.isAlive and entitylib.character.RootPart then
+			local root = entitylib.character.RootPart
+			local dest = (moveDirection * math.max(options.Value.Value - (entitylib.character.Humanoid and entitylib.character.Humanoid.WalkSpeed or 16), 0) * (dt or 0.016))
+			root.CFrame += dest
 		end
 	end,
 	WalkSpeed = function(options)
-		if not options.WalkSpeed then options.WalkSpeed = entitylib.character.Humanoid.WalkSpeed end
-		entitylib.character.Humanoid.WalkSpeed = options.Value.Value
+		if entitylib.isAlive and entitylib.character.Humanoid then
+			entitylib.character.Humanoid.WalkSpeed = options.Value.Value
+		end
 	end
 }
 
-local SpeedMethodList = {'Velocity', 'Impulse', 'CFrame', 'TP', 'WalkSpeed'}
-
 -- Fly
-run(function()
-	local Fly, Mode, FloatMode, State, MoveMethod, Keys, VerticalValue, BounceLength, BounceDelay, FloatTPGround, FloatTPAir, CustomProperties, WallCheck, PlatformStanding
-	local Options = { TPTiming = tick() }
-	local Platform, YLevel, OldYLevel
-	local w, s, a, d, up, down = 0, 0, 0, 0, 0, 0
-	local rayCheck = RaycastParams.new()
-	rayCheck.RespectCanCollide = true
-	Options.rayCheck = rayCheck
-
-	local Functions = {
-		Velocity = function()
-			entitylib.character.RootPart.AssemblyLinearVelocity = (entitylib.character.RootPart.AssemblyLinearVelocity * Vector3.new(1, 0, 1)) + Vector3.new(0, 2.25 + ((up + down) * VerticalValue.Value), 0)
-		end,
-		Impulse = function()
-			local root = entitylib.character.RootPart
-			local diff = (Vector3.new(0, 2.25 + ((up + down) * VerticalValue.Value), 0) - root.AssemblyLinearVelocity) * Vector3.new(0, 1, 0)
-			if diff.Magnitude > 2 then root:ApplyImpulse(diff * root.AssemblyMass) end
-		end,
-		CFrame = function(dt)
-			local root = entitylib.character.RootPart
-			if not YLevel then YLevel = root.Position.Y end
-			YLevel = YLevel + ((up + down) * VerticalValue.Value * dt)
-			if WallCheck.Enabled then
-				rayCheck.FilterDescendantsInstances = {lplr.Character, gameCamera}
-				rayCheck.CollisionGroup = root.CollisionGroup
-				local ray = workspace:Raycast(root.Position, Vector3.new(0, YLevel - root.Position.Y, 0), rayCheck)
-				if ray then YLevel = ray.Position.Y + entitylib.character.HipHeight end
-			end
-			root.CFrame += Vector3.new(0, YLevel - root.Position.Y, 0)
-		end,
-		Floor = function()
-			if Platform then
-				Platform.CFrame = down ~= 0 and CFrame.identity or entitylib.character.RootPart.CFrame + Vector3.new(0, -(entitylib.character.HipHeight + 0.5), 0)
-			end
-		end
-	}
-
+task.spawn(function()
+	local Fly, Mode, Options, CustomProperties
 	Fly = Modern.Catalogs.Movement:AddModule({
 		Name = 'Fly',
 		Function = function(callback)
-			if Platform then Platform.Parent = callback and gameCamera or nil end
 			frictionTable.Fly = callback and CustomProperties.Enabled or nil
 			updateVelocity()
 			if callback then
 				Fly:Clean(RunService.PreSimulation:Connect(function(dt)
-					if entitylib.isAlive then
-						if PlatformStanding.Enabled then
-							entitylib.character.Humanoid.PlatformStand = true
-							entitylib.character.RootPart.RotVelocity = Vector3.zero
-							entitylib.character.RootPart.CFrame = CFrame.lookAlong(entitylib.character.RootPart.CFrame.Position, gameCamera.CFrame.LookVector)
-						end
-						if State.Value ~= 'None' then
-							entitylib.character.Humanoid:ChangeState(Enum.HumanoidStateType[State.Value])
-						end
-						SpeedMethods[Mode.Value](Options, TargetStrafeVector or MoveMethod.Value == 'Direct' and calculateMoveVector(Vector3.new(a + d, 0, w + s)) or entitylib.character.Humanoid.MoveDirection, dt)
-						if Functions[FloatMode.Value] then Functions[FloatMode.Value](dt) end
-					else
-						YLevel = nil; OldYLevel = nil
+					if entitylib.isAlive and entitylib.character.RootPart then
+						local movevec = calculateMoveVector(Vector3.new(
+							(UserInputService:IsKeyDown(Enum.KeyCode.D) and 1 or 0) - (UserInputService:IsKeyDown(Enum.KeyCode.A) and 1 or 0),
+							0,
+							(UserInputService:IsKeyDown(Enum.KeyCode.S) and 1 or 0) - (UserInputService:IsKeyDown(Enum.KeyCode.W) and 1 or 0)
+						))
+						local upDown = (UserInputService:IsKeyDown(Enum.KeyCode.Space) and 1 or 0) - (UserInputService:IsKeyDown(Enum.KeyCode.LeftShift) and 1 or 0)
+						local velocity = (movevec * Options.Value.Value) + Vector3.new(0, upDown * Options.Value.Value, 0)
+						entitylib.character.RootPart.AssemblyLinearVelocity = velocity
 					end
 				end))
-
-				w, s, a, d = UserInputService:IsKeyDown(Enum.KeyCode.W) and -1 or 0, UserInputService:IsKeyDown(Enum.KeyCode.S) and 1 or 0, UserInputService:IsKeyDown(Enum.KeyCode.A) and -1 or 0, UserInputService:IsKeyDown(Enum.KeyCode.D) and 1 or 0
-				up, down = 0, 0
-
-				for _, v in {'InputBegan', 'InputEnded'} do
-					Fly:Clean(UserInputService[v]:Connect(function(input)
-						if not UserInputService:GetFocusedTextBox() then
-							local divided = Keys.Value:split('/')
-							if input.KeyCode == Enum.KeyCode.W then w = v == 'InputBegan' and -1 or 0
-							elseif input.KeyCode == Enum.KeyCode.S then s = v == 'InputBegan' and 1 or 0
-							elseif input.KeyCode == Enum.KeyCode.A then a = v == 'InputBegan' and -1 or 0
-							elseif input.KeyCode == Enum.KeyCode.D then d = v == 'InputBegan' and 1 or 0
-							elseif input.KeyCode == Enum.KeyCode[divided[1]] then up = v == 'InputBegan' and 1 or 0
-							elseif input.KeyCode == Enum.KeyCode[divided[2]] then down = v == 'InputBegan' and -1 or 0
-							end
-						end
-					end))
-				end
 			else
-				YLevel, OldYLevel = nil, nil
-				if entitylib.isAlive and PlatformStanding.Enabled then entitylib.character.Humanoid.PlatformStand = false end
+				if entitylib.isAlive and entitylib.character.RootPart then
+					entitylib.character.RootPart.AssemblyLinearVelocity = Vector3.zero
+				end
 			end
 		end
 	})
-
-	Mode = Fly:AddDropdown({ Name = 'Speed Mode', List = SpeedMethodList })
-	FloatMode = Fly:AddDropdown({ Name = 'Float Mode', List = {'Velocity', 'Impulse', 'CFrame', 'Floor'} })
-	State = Fly:AddDropdown({ Name = 'Humanoid State', List = {'None', 'Freefall', 'Flying'} })
-	MoveMethod = Fly:AddDropdown({ Name = 'Move Mode', List = {'MoveDirection', 'Direct'} })
-	Keys = Fly:AddDropdown({ Name = 'Keys', List = {'Space/LeftControl', 'Space/LeftShift', 'E/Q'} })
-	Options.Value = Fly:AddSlider({ Name = 'Speed', Min = 1, Max = 150, Default = 50 })
-	VerticalValue = Fly:AddSlider({ Name = 'Vertical Speed', Min = 1, Max = 150, Default = 50 })
-	WallCheck = Fly:AddToggle({ Name = 'Wall Check', Default = true })
-	Options.WallCheck = WallCheck
-	PlatformStanding = Fly:AddToggle({ Name = 'PlatformStand' })
+	Options = { Value = Fly:AddSlider({ Name = 'Speed', Min = 1, Max = 150, Default = 50 }) }
 	CustomProperties = Fly:AddToggle({ Name = 'Custom Properties', Default = true })
 end)
 
 -- Speed
-run(function()
+task.spawn(function()
 	local Speed, Mode, Options, AutoJump, CustomProperties
-	local w, s, a, d = 0, 0, 0, 0
-
 	Speed = Modern.Catalogs.Movement:AddModule({
 		Name = 'Speed',
 		Function = function(callback)
@@ -1339,248 +1054,268 @@ run(function()
 			if callback then
 				Speed:Clean(RunService.PreSimulation:Connect(function(dt)
 					if entitylib.isAlive and not Modern.Modules.Fly.Enabled then
-						local movevec = TargetStrafeVector or Options.MoveMethod.Value == 'Direct' and calculateMoveVector(Vector3.new(a + d, 0, w + s)) or entitylib.character.Humanoid.MoveDirection
-						SpeedMethods[Mode.Value](Options, movevec, dt)
+						local movevec = entitylib.character.Humanoid.MoveDirection
+						if SpeedMethods[Mode.Value] then
+							SpeedMethods[Mode.Value](Options, movevec, dt)
+						end
 						if AutoJump.Enabled and entitylib.character.Humanoid.FloorMaterial ~= Enum.Material.Air and movevec ~= Vector3.zero then
 							entitylib.character.Humanoid:ChangeState(Enum.HumanoidStateType.Jumping)
 						end
 					end
 				end))
-
-				w, s, a, d = UserInputService:IsKeyDown(Enum.KeyCode.W) and -1 or 0, UserInputService:IsKeyDown(Enum.KeyCode.S) and 1 or 0, UserInputService:IsKeyDown(Enum.KeyCode.A) and -1 or 0, UserInputService:IsKeyDown(Enum.KeyCode.D) and 1 or 0
-				for _, v in {'InputBegan', 'InputEnded'} do
-					Speed:Clean(UserInputService[v]:Connect(function(input)
-						if not UserInputService:GetFocusedTextBox() then
-							if input.KeyCode == Enum.KeyCode.W then w = v == 'InputBegan' and -1 or 0
-							elseif input.KeyCode == Enum.KeyCode.S then s = v == 'InputBegan' and 1 or 0
-							elseif input.KeyCode == Enum.KeyCode.A then a = v == 'InputBegan' and -1 or 0
-							elseif input.KeyCode == Enum.KeyCode.D then d = v == 'InputBegan' and 1 or 0
-							end
-						end
-					end))
-				end
 			else
-				if Options.WalkSpeed and entitylib.isAlive then
-					entitylib.character.Humanoid.WalkSpeed = Options.WalkSpeed
+				if entitylib.isAlive and entitylib.character.Humanoid then
+					entitylib.character.Humanoid.WalkSpeed = 16
 				end
-				Options.WalkSpeed = nil
 			end
 		end
 	})
 
-	Mode = Speed:AddDropdown({ Name = 'Mode', List = SpeedMethodList })
-	Options = {
-		MoveMethod = Speed:AddDropdown({ Name = 'Move Mode', List = {'MoveDirection', 'Direct'} }),
-		Value = Speed:AddSlider({ Name = 'Speed', Min = 1, Max = 150, Default = 50 }),
-		WallCheck = Speed:AddToggle({ Name = 'Wall Check', Default = true }),
-		TPTiming = tick(),
-		rayCheck = RaycastParams.new()
-	}
-	Options.rayCheck.RespectCanCollide = true
+	Mode = Speed:AddDropdown({ Name = 'Mode', List = {'Velocity', 'Impulse', 'CFrame', 'WalkSpeed'} })
+	Options = { Value = Speed:AddSlider({ Name = 'Speed', Min = 1, Max = 150, Default = 50 }) }
 	CustomProperties = Speed:AddToggle({ Name = 'Custom Properties', Default = true })
 	AutoJump = Speed:AddToggle({ Name = 'AutoJump' })
 end)
 
 -- NameTags
-run(function()
-	local NameTags, Scale, Background, GlowEffect, Health, Distance, DisplayName, DrawingToggle, Teammates, DistanceCheck, DistanceLimit
-	local Strings, Sizes, Reference, Gradients = {}, {}, {}, {}
-	local Folder = Instance.new('Folder')
-	Folder.Name = 'NameTagsFolder'
-	Folder.Parent = Modern.MainScreenGui
-	local methodused
+task.spawn(function()
+	local NameTags, Scale, Background, Health, Distance
+	local Reference = {}
 
-	local Added = {
-		Normal = function(ent)
-			if ent.NPC then return end
-			if Teammates and Teammates.Enabled and (not ent.Targetable) then return end
+	local function addTag(ent)
+		if ent.NPC or Reference[ent] then return end
+		local tag = Instance.new('TextLabel')
+		tag.TextSize = 14 * (Scale and Scale.Value or 1)
+		tag.FontFace = Modern.Libraries.uipallet.Font
+		tag.Size = UDim2.fromOffset(120, 24)
+		tag.AnchorPoint = Vector2.new(0.5, 1)
+		tag.BackgroundColor3 = Color3.fromRGB(15, 15, 20)
+		tag.BackgroundTransparency = Background and Background.Value or 0.4
+		tag.TextColor3 = Color3.fromRGB(255, 255, 255)
+		tag.RichText = true
+		tag.Parent = Modern.MainScreenGui
+		addCorner(tag, UDim.new(0, 4))
+		Reference[ent] = tag
+	end
 
-			Strings[ent] = ent.Player and (DisplayName and DisplayName.Enabled and ent.Player.DisplayName or ent.Player.Name) or ent.Character.Name
-			if Health and Health.Enabled then
-				local healthColor = Color3.fromHSV(math.clamp(ent.Health / ent.MaxHealth, 0, 1) / 2.5, 0.89, 0.75)
-				Strings[ent] = Strings[ent]..' <font color="rgb('..math.floor(healthColor.R * 255)..','..math.floor(healthColor.G * 255)..','..math.floor(healthColor.B * 255)..')">'..math.round(ent.Health)..'</font>'
-			end
-			if Distance and Distance.Enabled then
-				Strings[ent] = '<font color="rgb(85, 255, 85)">[</font><font color="rgb(255, 255, 255)">%s</font><font color="rgb(85, 255, 85)">]</font> '..Strings[ent]
-			end
-
-			local nametag = Instance.new('TextLabel')
-			nametag.TextSize = 14 * (Scale and Scale.Value or 1)
-			nametag.FontFace = Modern.Libraries.uipallet.Font
-			nametag.ZIndex = -1
-			local ize = getfontsize(removeTags(Strings[ent]), nametag.TextSize, Modern.Libraries.uipallet.Font, Vector2.new(100000, 100000))
-			nametag.Name = ent.Player and ent.Player.Name or ent.Character.Name
-			nametag.Size = UDim2.fromOffset(ize.X + 8, ize.Y + 7)
-			nametag.AnchorPoint = Vector2.new(0.5, 1)
-			nametag.BackgroundColor3 = Color3.new()
-			nametag.BackgroundTransparency = Background and Background.Value or 0.5
-			nametag.BorderSizePixel = 0
-			if GlowEffect and GlowEffect.Enabled then
-				addGradient(addRoundedShadow(nametag))
-			end
-			addCorner(nametag, UDim.new(0, 5))
-			nametag.Visible = false
-			nametag.Text = Strings[ent]
-			if entitylib.getEntityColor(ent) then
-				nametag.TextColor3 = entitylib.getEntityColor(ent)
-			else
-				nametag.TextColor3 = Color3.fromRGB(255, 255, 255)
-				Gradients[ent] = addGradient(nametag)
-			end
-			nametag.RichText = true
-			nametag.Parent = Folder
-			Reference[ent] = nametag
-		end,
-		Drawing = function(ent)
-			if Teammates and Teammates.Enabled and (not ent.Targetable) then return end
-
-			local nametag = {}
-			nametag.BG = Drawing.new('Square')
-			nametag.BG.Filled = true
-			nametag.BG.Transparency = 1 - (Background and Background.Value or 0.5)
-			nametag.BG.Color = Color3.new()
-			nametag.BG.ZIndex = 1
-
-			nametag.Text = Drawing.new('Text')
-			nametag.Text.Size = 15 * (Scale and Scale.Value or 1)
-			nametag.Text.Font = 0
-			nametag.Text.ZIndex = 2
-
-			Strings[ent] = ent.Player and (DisplayName and DisplayName.Enabled and ent.Player.DisplayName or ent.Player.Name) or ent.Character.Name
-			if Health and Health.Enabled then
-				Strings[ent] = Strings[ent]..' '..math.round(ent.Health)
-			end
-			if Distance and Distance.Enabled then
-				Strings[ent] = '[%s] '..Strings[ent]
-			end
-
-			nametag.Text.Text = Strings[ent]
-			nametag.Text.Color = entitylib.getEntityColor(ent) or Modern.Libraries.uipallet.FinalColor
-			nametag.BG.Size = Vector2.new(nametag.Text.TextBounds.X + 8, nametag.Text.TextBounds.Y + 7)
-			Reference[ent] = nametag
+	local function removeTag(ent)
+		if Reference[ent] then
+			Reference[ent]:Destroy()
+			Reference[ent] = nil
 		end
-	}
-
-	local Removed = {
-		Normal = function(ent)
-			local v = Reference[ent]
-			if v then
-				Reference[ent] = nil
-				Strings[ent] = nil
-				Sizes[ent] = nil
-				v:Destroy()
-			end
-		end,
-		Drawing = function(ent)
-			local v = Reference[ent]
-			if v then
-				Reference[ent] = nil
-				Strings[ent] = nil
-				Sizes[ent] = nil
-				for _, v2 in v do
-					pcall(function()
-						v2.Visible = false
-						v2:Remove()
-					end)
-				end
-			end
-		end
-	}
-
-	local Loop = {
-		Normal = function()
-			for ent, nametag in Reference do
-				if DistanceCheck and DistanceCheck.Enabled then
-					local distance = entitylib.isAlive and (entitylib.character.RootPart.Position - ent.RootPart.Position).Magnitude or math.huge
-					if distance > (DistanceLimit and DistanceLimit.Value or 200) then
-						nametag.Visible = false
-						continue
-					end
-				end
-
-				local headPos, headVis = gameCamera:WorldToViewportPoint(ent.RootPart.Position + Vector3.new(0, ent.HipHeight + 1, 0))
-				nametag.Visible = headVis
-				if not headVis then continue end
-
-				if Distance and Distance.Enabled then
-					local mag = entitylib.isAlive and math.floor((entitylib.character.RootPart.Position - ent.RootPart.Position).Magnitude) or 0
-					if Sizes[ent] ~= mag then
-						nametag.Text = string.format(Strings[ent], mag)
-						local ize = getfontsize(removeTags(nametag.Text), nametag.TextSize, nametag.FontFace, Vector2.new(100000, 100000))
-						nametag.Size = UDim2.fromOffset(ize.X + 8, ize.Y + 7)
-						Sizes[ent] = mag
-					end
-				end
-				nametag.Position = UDim2.fromOffset(headPos.X, headPos.Y)
-			end
-		end,
-		Drawing = function()
-			for ent, nametag in Reference do
-				if DistanceCheck and DistanceCheck.Enabled then
-					local distance = entitylib.isAlive and (entitylib.character.RootPart.Position - ent.RootPart.Position).Magnitude or math.huge
-					if distance > (DistanceLimit and DistanceLimit.Value or 200) then
-						nametag.Text.Visible = false
-						nametag.BG.Visible = false
-						continue
-					end
-				end
-
-				local headPos, headVis = gameCamera:WorldToScreenPoint(ent.RootPart.Position + Vector3.new(0, ent.HipHeight + 1, 0))
-				nametag.Text.Visible = headVis
-				nametag.BG.Visible = headVis
-				if not headVis then continue end
-
-				if Distance and Distance.Enabled then
-					local mag = entitylib.isAlive and math.floor((entitylib.character.RootPart.Position - ent.RootPart.Position).Magnitude) or 0
-					if Sizes[ent] ~= mag then
-						nametag.Text.Text = string.format(Strings[ent], mag)
-						nametag.BG.Size = Vector2.new(nametag.Text.TextBounds.X + 8, nametag.Text.TextBounds.Y + 7)
-						Sizes[ent] = mag
-					end
-				end
-				nametag.BG.Position = Vector2.new(headPos.X - (nametag.BG.Size.X / 2), headPos.Y + (nametag.BG.Size.Y / 2))
-				nametag.Text.Position = nametag.BG.Position + Vector2.new(4, 2.5)
-			end
-		end
-	}
+	end
 
 	NameTags = Modern.Catalogs.Render:AddModule({
 		Name = 'NameTags',
 		Function = function(callback)
 			if callback then
-				methodused = (DrawingToggle and DrawingToggle.Enabled) and 'Drawing' or 'Normal'
-				if Removed[methodused] then
-					NameTags:Clean(entitylib.Events.EntityRemoved:Connect(Removed[methodused]))
-				end
-				if Added[methodused] then
-					for _, v in entitylib.List do
-						if Reference[v] then Removed[methodused](v) end
-						Added[methodused](v)
+				for _, ent in ipairs(entitylib.List) do addTag(ent) end
+				NameTags:Clean(entitylib.Events.EntityAdded:Connect(addTag))
+				NameTags:Clean(entitylib.Events.EntityRemoved:Connect(removeTag))
+				NameTags:Clean(RunService.RenderStepped:Connect(function()
+					for ent, tag in pairs(Reference) do
+						if ent and ent.RootPart and ent.RootPart.Parent then
+							local headPos, headVis = gameCamera:WorldToViewportPoint(ent.RootPart.Position + Vector3.new(0, ent.HipHeight + 1, 0))
+							tag.Visible = headVis
+							if headVis then
+								local str = (ent.Player and ent.Player.Name or 'Entity')
+								if Health.Enabled then str = str .. string.format(' <font color="rgb(100,255,100)">[%d]</font>', math.round(ent.Health)) end
+								if Distance.Enabled and entitylib.isAlive then
+									local mag = math.floor((entitylib.character.RootPart.Position - ent.RootPart.Position).Magnitude)
+									str = string.format('<font color="rgb(175,175,255)">%dm</font> ', mag) .. str
+								end
+								tag.Text = str
+								tag.Position = UDim2.fromOffset(headPos.X, headPos.Y)
+							end
+						else
+							removeTag(ent)
+						end
 					end
-					NameTags:Clean(entitylib.Events.EntityAdded:Connect(function(ent)
-						if Reference[ent] then Removed[methodused](ent) end
-						Added[methodused](ent)
-					end))
-				end
-				if Loop[methodused] then
-					NameTags:Clean(RunService.RenderStepped:Connect(Loop[methodused]))
-				end
+				end))
 			else
-				if Removed[methodused] then
-					for i in Reference do Removed[methodused](i) end
-				end
+				for ent in pairs(Reference) do removeTag(ent) end
 			end
 		end
 	})
 
-	Scale = NameTags:AddSlider({ Name = 'Scale', Default = 1, Min = 0.1, Max = 1.5, Decimal = 10 })
-	Background = NameTags:AddSlider({ Name = 'Transparency', Default = 0.5, Min = 0, Max = 1, Decimal = 10 })
-	GlowEffect = NameTags:AddToggle({ Name = 'Glow Effect', Default = true })
+	Scale = NameTags:AddSlider({ Name = 'Scale', Default = 1, Min = 0.5, Max = 1.5 })
+	Background = NameTags:AddSlider({ Name = 'Transparency', Default = 0.4, Min = 0, Max = 1 })
 	Health = NameTags:AddToggle({ Name = 'Health', Default = true })
 	Distance = NameTags:AddToggle({ Name = 'Distance', Default = true })
-	DisplayName = NameTags:AddToggle({ Name = 'Display Name', Default = true })
-	DrawingToggle = NameTags:AddToggle({ Name = 'Use Drawing API', Default = false })
-	Teammates = NameTags:AddToggle({ Name = 'Show Teammates', Default = false })
-	DistanceCheck = NameTags:AddToggle({ Name = 'Distance Check', Default = false })
-	DistanceLimit = NameTags:AddSlider({ Name = 'Distance Limit', Min = 10, Max = 1000, Default = 200 })
 end)
+
+----------------------------------------------------------------
+-- INTERACTIVE TEST GUI BUILDER
+----------------------------------------------------------------
+local function buildInteractiveGUI()
+	local MainFrame = Instance.new('Frame')
+	MainFrame.Name = 'ModernTestWindow'
+	MainFrame.Size = UDim2.fromOffset(580, 360)
+	MainFrame.Position = UDim2.new(0.5, -290, 0.5, -180)
+	MainFrame.BackgroundColor3 = Color3.fromRGB(20, 22, 28)
+	MainFrame.BorderSizePixel = 0
+	MainFrame.Active = true
+	MainFrame.Draggable = true
+	MainFrame.Parent = Modern.MainScreenGui
+
+	addCorner(MainFrame, UDim.new(0, 8))
+	addRoundedShadow(MainFrame)
+
+	-- Header Title Bar
+	local Header = Instance.new('Frame')
+	Header.Name = 'Header'
+	Header.Size = UDim2.new(1, 0, 0, 40)
+	Header.BackgroundColor3 = Color3.fromRGB(28, 30, 38)
+	Header.BorderSizePixel = 0
+	Header.Parent = MainFrame
+	addCorner(Header, UDim.new(0, 8))
+
+	local Title = Instance.new('TextLabel')
+	Title.Size = UDim2.new(1, -20, 1, 0)
+	Title.Position = UDim2.fromOffset(12, 0)
+	Title.BackgroundTransparency = 1
+	Title.Text = "<b>MODERN UNIVERSAL</b> <font color='rgb(115,130,255)'>[Test GUI]</font>"
+	Title.RichText = true
+	Title.TextColor3 = Color3.fromRGB(240, 240, 240)
+	Title.TextSize = 16
+	Title.FontFace = Modern.Libraries.uipallet.Font
+	Title.TextXAlignment = Enum.TextXAlignment.Left
+	Title.Parent = Header
+
+	local KeyHint = Instance.new('TextLabel')
+	KeyHint.Size = UDim2.new(0, 180, 1, 0)
+	KeyHint.Position = UDim2.new(1, -190, 0, 0)
+	KeyHint.BackgroundTransparency = 1
+	KeyHint.Text = "[Press RightShift / Insert to Toggle]"
+	KeyHint.TextColor3 = Color3.fromRGB(140, 145, 160)
+	KeyHint.TextSize = 12
+	KeyHint.FontFace = Modern.Libraries.uipallet.Font
+	KeyHint.TextXAlignment = Enum.TextXAlignment.Right
+	KeyHint.Parent = Header
+
+	-- Sidebar Category Tabs
+	local Sidebar = Instance.new('Frame')
+	Sidebar.Size = UDim2.new(0, 130, 1, -40)
+	Sidebar.Position = UDim2.fromOffset(0, 40)
+	Sidebar.BackgroundColor3 = Color3.fromRGB(24, 26, 33)
+	Sidebar.BorderSizePixel = 0
+	Sidebar.Parent = MainFrame
+
+	local SidebarLayout = Instance.new('UIListLayout')
+	SidebarLayout.Padding = UDim.new(0, 4)
+	SidebarLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+	SidebarLayout.SortOrder = Enum.SortOrder.LayoutOrder
+	SidebarLayout.Parent = Sidebar
+
+	local SidebarPadding = Instance.new('UIPadding')
+	SidebarPadding.PaddingTop = UDim.new(0, 8)
+	SidebarPadding.Parent = Sidebar
+
+	-- Container for Category Pages
+	local ContentArea = Instance.new('Frame')
+	ContentArea.Size = UDim2.new(1, -140, 1, -50)
+	ContentArea.Position = UDim2.fromOffset(135, 45)
+	ContentArea.BackgroundTransparency = 1
+	ContentArea.Parent = MainFrame
+
+	local categoryPages = {}
+	local categoryButtons = {}
+
+	local categories = {'Combat', 'Movement', 'Render', 'Player', 'Other', 'World', 'Minigames'}
+
+	for i, catName in ipairs(categories) do
+		-- Create Category Page Frame
+		local page = Instance.new('ScrollingFrame')
+		page.Name = catName .. 'Page'
+		page.Size = UDim2.new(1, 0, 1, 0)
+		page.BackgroundTransparency = 1
+		page.BorderSizePixel = 0
+		page.ScrollBarThickness = 4
+		page.ScrollBarImageColor3 = Color3.fromRGB(115, 130, 255)
+		page.Visible = (i == 1)
+		page.Parent = ContentArea
+
+		local grid = Instance.new('UIGridLayout')
+		grid.CellSize = UDim2.fromOffset(205, 42)
+		grid.CellPadding = UDim2.fromOffset(8, 8)
+		grid.SortOrder = Enum.SortOrder.Name
+		grid.Parent = page
+
+		categoryPages[catName] = page
+
+		-- Create Sidebar Tab Button
+		local tabBtn = Instance.new('TextButton')
+		tabBtn.Size = UDim2.new(0, 115, 0, 32)
+		tabBtn.BackgroundColor3 = (i == 1) and Color3.fromRGB(115, 130, 255) or Color3.fromRGB(32, 35, 45)
+		tabBtn.Text = catName
+		tabBtn.TextColor3 = (i == 1) and Color3.fromRGB(255, 255, 255) or Color3.fromRGB(170, 175, 190)
+		tabBtn.TextSize = 13
+		tabBtn.FontFace = Modern.Libraries.uipallet.Font
+		tabBtn.Parent = Sidebar
+		addCorner(tabBtn, UDim.new(0, 5))
+
+		categoryButtons[catName] = tabBtn
+
+		tabBtn.MouseButton1Click:Connect(function()
+			for cName, pFrame in pairs(categoryPages) do
+				pFrame.Visible = (cName == catName)
+			end
+			for cName, bBtn in pairs(categoryButtons) do
+				bBtn.BackgroundColor3 = (cName == catName) and Color3.fromRGB(115, 130, 255) or Color3.fromRGB(32, 35, 45)
+				bBtn.TextColor3 = (cName == catName) and Color3.fromRGB(255, 255, 255) or Color3.fromRGB(170, 175, 190)
+			end
+		end)
+	end
+
+	-- Populate Module Toggle Buttons dynamically
+	for modName, mod in pairs(Modern.Modules) do
+		local catPage = categoryPages[mod.Category] or categoryPages['Other']
+		if catPage then
+			local btn = Instance.new('TextButton')
+			btn.Name = modName
+			btn.Size = UDim2.fromOffset(205, 42)
+			btn.BackgroundColor3 = mod.Enabled and Color3.fromRGB(50, 180, 100) or Color3.fromRGB(34, 37, 48)
+			btn.Text = "  " .. modName .. (mod.Enabled and " [ON]" or " [OFF]")
+			btn.TextColor3 = Color3.fromRGB(240, 240, 240)
+			btn.TextSize = 13
+			btn.FontFace = Modern.Libraries.uipallet.Font
+			btn.TextXAlignment = Enum.TextXAlignment.Left
+			btn.Parent = catPage
+			addCorner(btn, UDim.new(0, 6))
+
+			-- Accent line indicator
+			local accent = Instance.new('Frame')
+			accent.Size = UDim2.new(0, 4, 1, -12)
+			accent.Position = UDim2.fromOffset(6, 6)
+			accent.BackgroundColor3 = mod.Enabled and Color3.fromRGB(100, 255, 150) or Color3.fromRGB(80, 85, 100)
+			accent.BorderSizePixel = 0
+			accent.Parent = btn
+			addCorner(accent, UDim.new(0, 2))
+
+			local function updateVisuals(state)
+				btn.BackgroundColor3 = state and Color3.fromRGB(45, 140, 85) or Color3.fromRGB(34, 37, 48)
+				accent.BackgroundColor3 = state and Color3.fromRGB(100, 255, 150) or Color3.fromRGB(80, 85, 100)
+				btn.Text = "      " .. modName .. (state and " [ENABLED]" or " [OFF]")
+			end
+
+			moduleUpdateCallbacks[modName] = updateVisuals
+			updateVisuals(mod.Enabled)
+
+			btn.MouseButton1Click:Connect(function()
+				mod:Toggle()
+			end)
+		end
+	end
+
+	-- Open/Close Menu Keybind Handler
+	Modern.ClickGuiStatus.Enabled = true
+	UserInputService.InputBegan:Connect(function(input, gpe)
+		if not gpe and (input.KeyCode == Enum.KeyCode.RightShift or input.KeyCode == Enum.KeyCode.Insert) then
+			MainFrame.Visible = not MainFrame.Visible
+			Modern.ClickGuiStatus.Enabled = MainFrame.Visible
+		end
+	end)
+end
+
+-- Initialize Test Interface
+task.defer(buildInteractiveGUI)
